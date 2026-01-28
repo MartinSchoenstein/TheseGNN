@@ -1,0 +1,33 @@
+M1 = Sage type : 2 couches SAGE puis prédiction par produit scalaires des embeddings de noeuds
+    --> Importation graph --> Attribut x : rien/statistiques/1 
+    --> Split + Arrêtes négatives : simple/proportionné intra-extra cc 
+    --> Potentiellement attribut x : statistiques une fois les arrêtes négatives générées
+    --> Training et Validation (ROC-AUC et AP)
+
+M2 = Sage type + MLP : 2 couches SAGE puis prédiction par un réseau MLP qui apprend à interpréter les embeddings de noeuds 
+    --> Importation graph --> Attribut x : rien/statistiques/1 
+    --> Split + Arrêtes négatives : simple/proportionné intra-extra cc 
+    --> Potentiellement attribut x : statistiques une fois les arrêtes négatives générées
+    --> Training et Validation (ROC-AUC et AP)
+
+M3 = SEAL type : 2 couches de convolution + MLP
+    --> Importation graph : sans attributs
+    --> Split + Arrêtes négatives : simple/80% intra cc
+    --> Extraction de sous graphes autour des arrêtes (positives/négatives) à prédire
+    --> Labelling des noeuds : DRNL ( = distance relative aux 2 noeuds cibles) 
+        --> noeuds cibles : 1, noeud inatteignable : 0, d = 1 + min(du,dv) + [(dv+du-2)*(dv+du-1)]/2
+            ==> EN GROS : classé par dx + dy puis par dx*dy
+    --> Training et Validation (ROC-AUC et AP) (sur les sousgraphes et leurs labels précalculés)
+
+M4 = Node2vec : Embeddings grâce à de la marche aléatoire + prédicteur
+    --> Importation graph : sans attributs
+    --> Split + Arrêtes négatives : simple/80% intra cc
+    --> Entrainement de node2vec pour générer des embeddings de noeuds basé sur la topologie 
+    --> Entrainement d'un prédicteur sur les embeddings
+    --> Training et Validation
+
+M5 : Node2Vec entrainement dirigé
+M6 : Sage PyG
+M7 : GCN
+M8 : GAT
+M9 : AutoEncoder
