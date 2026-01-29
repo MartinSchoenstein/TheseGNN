@@ -1,5 +1,5 @@
 #!/home/schoenstein/.conda/envs/graphe/bin/python
-#SBATCH --job-name=LP_M1
+#SBATCH --job-name=LP_M8
 #SBATCH --output=/home/schoenstein/these/slurm_out/slurm-%J.out --error=/home/schoenstein/these/slurm_out/slurm-%J.err
 
 
@@ -10,7 +10,7 @@ import torch
 from torch_geometric.utils import from_networkx
 import torch_geometric.transforms as T
 from torch_geometric.data import Data
-from torch_geometric.nn import SAGEConv
+from torch_geometric.nn import GATv2Conv
 import torch.nn.functional as F
 from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import roc_auc_score
@@ -23,7 +23,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
-with open("M1_settings.json", "r") as file:
+with open("M2_settings.json", "r") as file:
     settings = json.load(file)
 
 
@@ -148,31 +148,36 @@ test_data = test_data.to(device)
 class GNN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels):
         super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels, aggr = settings["options"]["aggr"])
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels, aggr = settings["options"]["aggr"])
+        self.conv1 = GATv2Conv(in_channels, hidden_channels)
+        self.conv2 = GATv2Conv(hidden_channels, hidden_channels)
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index)
         x = torch.relu(x)
         x = self.conv2(x, edge_index)
         return x
 class Predictor(torch.nn.Module):
+    def __init__(self, hidden_channels):
+        super().__init__()
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(2 * hidden_channels, hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_channels, 1)
+        )
     def forward(self, x, edge_label_index):
         edge_emb_src = x[edge_label_index[0]]
         edge_emb_dst = x[edge_label_index[1]]
-        edge_emb_src = F.normalize(edge_emb_src, dim = -1)
-        edge_emb_dst = F.normalize(edge_emb_dst, dim = -1)
-        pred = (edge_emb_src * edge_emb_dst).sum(dim = -1)
-        return pred
+        edge_emb = torch.cat([edge_emb_src, edge_emb_dst], dim=-1)
+        return self.mlp(edge_emb).view(-1)
 class Model(torch.nn.Module):
-    def __init__(self, in_channels, hiden_channels):
+    def __init__(self, in_channels, hidden_channels):
         super().__init__()
-        self.gnn = GNN(in_channels, hiden_channels)
-        self.predictor = Predictor()
+        self.gnn = GNN(in_channels, hidden_channels)
+        self.predictor = Predictor(hidden_channels)
     def forward(self, data):
         x = self.gnn(data.x, data.edge_index)
         pred = self.predictor(x, data.edge_label_index)
         return pred
-model = Model(in_channels = train_data.x.shape[1], hiden_channels = settings["options"]["hidden_channels"]).to(device)
+model = Model(in_channels = train_data.x.shape[1], hidden_channels = settings["options"]["hidden_channels"]).to(device)
 
 
 
@@ -236,7 +241,7 @@ def evaluate():
 
 
 now = datetime.now()
-output_path = settings["output"] + "LP_M1_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
+output_path = settings["output"] + "LP_M8_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
 with open(output_path, "w") as output:
     best_val_auc = 0
     limit = settings["options"]["early_stop"]

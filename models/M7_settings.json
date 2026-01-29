@@ -1,0 +1,12 @@
+{"graph": "/home/schoenstein/these/gnn_postbiblio/graph/graph_full.gml",
+"options": {
+        "negative_sampling": "random",
+        "attributes": "unique",
+        "hidden_channels": 64,
+        "num_neighbors": [25, 10],
+        "batch_size": 128,
+        "lr": 0.01,
+        "early_stop": 6
+    },
+"output": "/home/schoenstein/these/"
+    }

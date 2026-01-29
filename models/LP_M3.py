@@ -1,5 +1,5 @@
 #!/home/schoenstein/.conda/envs/graphe/bin/python
-#SBATCH --job-name=LP_M1
+#SBATCH --job-name=LP_M3
 #SBATCH --output=/home/schoenstein/these/slurm_out/slurm-%J.out --error=/home/schoenstein/these/slurm_out/slurm-%J.err
 
 
@@ -16,6 +16,8 @@ from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
 from datetime import datetime
+from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.loader import DataLoader
 
 
 
@@ -23,7 +25,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
-with open("M1_settings.json", "r") as file:
+with open("M3_settings.json", "r") as file:
     settings = json.load(file)
 
 
@@ -118,6 +120,31 @@ elif settings["options"]["negative_sampling"] == "double split":
 
 
 
+def labelling(batch):
+    edge_index = batch.edge_index
+    u, v = batch.edge_label_index
+    mask = ~(((edge_index[0] == u) & (edge_index[1] == v)) | ((edge_index[0] == v) & (edge_index[1] == u)))
+    edge_index = edge_index[:, mask]
+    G = nx.Graph()
+    G.add_nodes_from(range(batch.num_nodes))
+    G.add_edges_from(edge_index.t().tolist())
+    du = nx.single_source_shortest_path_length(G, int(u))
+    dv = nx.single_source_shortest_path_length(G, int(v))
+    labels = []
+    for n in range(batch.num_nodes):
+        if n == u or n == v:
+            labels.append(1)
+        else:
+            dun = du.get(n, "unr")
+            dvn = dv.get(n, "unr")
+            if dun == "unr" or dvn == "unr":
+                 labels.append(0)
+            else:
+                labels.append(1 + min(dun, dvn) + ((dun + dvn - 2)*(dun + dvn - 1)) // 2)
+    return torch.tensor(labels).unsqueeze(-1).float(), edge_index  
+
+
+
 if settings["options"]["attributes"] == "unique":
     train_data.x = torch.ones((train_data.num_nodes, 1))
     val_data.x = train_data.x.clone()
@@ -144,43 +171,12 @@ test_data = test_data.to(device)
 
 
 
-
-class GNN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels):
-        super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels, aggr = settings["options"]["aggr"])
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels, aggr = settings["options"]["aggr"])
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = torch.relu(x)
-        x = self.conv2(x, edge_index)
-        return x
-class Predictor(torch.nn.Module):
-    def forward(self, x, edge_label_index):
-        edge_emb_src = x[edge_label_index[0]]
-        edge_emb_dst = x[edge_label_index[1]]
-        edge_emb_src = F.normalize(edge_emb_src, dim = -1)
-        edge_emb_dst = F.normalize(edge_emb_dst, dim = -1)
-        pred = (edge_emb_src * edge_emb_dst).sum(dim = -1)
-        return pred
-class Model(torch.nn.Module):
-    def __init__(self, in_channels, hiden_channels):
-        super().__init__()
-        self.gnn = GNN(in_channels, hiden_channels)
-        self.predictor = Predictor()
-    def forward(self, data):
-        x = self.gnn(data.x, data.edge_index)
-        pred = self.predictor(x, data.edge_label_index)
-        return pred
-model = Model(in_channels = train_data.x.shape[1], hiden_channels = settings["options"]["hidden_channels"]).to(device)
-
-
-
 train_loader = LinkNeighborLoader(
     data = train_data,
     num_neighbors = settings["options"]["num_neighbors"],
     edge_label_index = train_data.edge_label_index,
     edge_label = train_data.edge_label,
+    subgraph_type = "induced",
     batch_size = settings["options"]["batch_size"],
     shuffle = True
 )
@@ -189,14 +185,104 @@ val_loader = LinkNeighborLoader(
     num_neighbors = settings["options"]["num_neighbors"], 
     edge_label_index = val_data.edge_label_index,
     edge_label = val_data.edge_label,
+    subgraph_type = "induced",
     batch_size = settings["options"]["batch_size"],
     shuffle = True
 )
 
 
 
+if settings["options"]["attributes"] == "unique":
+    train_subgraphs_data = []
+    for batch in train_loader:
+        batch.x, batch.edge_index = labelling(batch)
+        data = Data(
+            x = batch.x,
+            edge_index = batch.edge_index,  
+            edge_label = batch.edge_label,      
+            edge_label_index = batch.edge_label_index  
+        )
+        train_subgraphs_data.append(data)
+    val_subgraphs_data = []
+    for batch in val_loader:
+        batch.x, batch.edge_index = labelling(batch)
+        data = Data(
+            x = batch.x,
+            edge_index = batch.edge_index,  
+            edge_label = batch.edge_label,      
+            edge_label_index = batch.edge_label_index  
+        )
+        val_subgraphs_data.append(data)
+elif settings["options"]["attributes"] == "statistics":
+    train_subgraphs_data = []
+    for batch in train_loader:
+        x_label, batch.edge_index = labelling(batch)
+        x_stats = batch.x
+        batch.x = torch.cat([x_label, x_stats], dim = 1)
+        data = Data(
+            x = batch.x,
+            edge_index = batch.edge_index,  
+            edge_label = batch.edge_label,      
+            edge_label_index = batch.edge_label_index  
+        )
+        train_subgraphs_data.append(data)
+    val_subgraphs_data = []
+    for batch in val_loader:
+        x_label, batch.edge_index = labelling(batch)
+        x_stats = batch.x
+        batch.x = torch.cat([x_label, x_stats], dim = 1)
+        data = Data(
+            x = batch.x,
+            edge_index = batch.edge_index,  
+            edge_label = batch.edge_label,      
+            edge_label_index = batch.edge_label_index  
+        )
+        val_subgraphs_data.append(data)
+
+
+
+
+class GNN(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super().__init__()
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = torch.relu(x)
+        x = self.conv2(x, edge_index)
+        return x
+class Predictor(torch.nn.Module):
+    def __init__(self, hidden_channels):
+        super().__init__()
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(hidden_channels, hidden_channels),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_channels, 1)
+        )
+    def forward(self, x):
+        return self.mlp(x).view(-1)
+class Model(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels):
+        super().__init__()
+        self.gnn = GNN(in_channels, hidden_channels)
+        self.predictor = Predictor(hidden_channels)
+    def forward(self, data):
+        x = self.gnn(data.x, data.edge_index)
+        x = global_mean_pool(x, data.batch)
+        pred = self.predictor(x)
+        return pred
+model = Model(in_channels = 1, hidden_channels = settings["options"]["hidden_channels"])
+
+
+
 optimizer = torch.optim.Adam(model.parameters(), lr=settings["options"]["lr"])
 
+
+
+train_reloader = DataLoader(train_subgraphs_data, batch_size=settings["options"]["batch_size2"], shuffle=True)
+val_reloader = DataLoader(val_subgraphs_data, batch_size=settings["options"]["batch_size2"])
+                          
 
 
 def train_epoch():
@@ -236,7 +322,7 @@ def evaluate():
 
 
 now = datetime.now()
-output_path = settings["output"] + "LP_M1_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
+output_path = settings["output"] + "LP_M3_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
 with open(output_path, "w") as output:
     best_val_auc = 0
     limit = settings["options"]["early_stop"]

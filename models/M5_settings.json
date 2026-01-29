@@ -1,0 +1,16 @@
+{"graph": "/home/schoenstein/these/gnn_postbiblio/graph/graph_full.gml",
+"options": {
+        "negative_sampling": "random",
+        "embedding_dim": 64,
+        "walk_length": 20,
+        "context_size": 10,
+        "walks_per_node": 10,
+        "p": 1.0,
+        "q": 1.0,
+        "num_negative_samples": 1,
+        "lr": 0.01,
+        "hidden_channels": 64,
+        "early_stop": 6
+    },
+"output": "/home/schoenstein/these/"
+    }

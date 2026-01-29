@@ -1,5 +1,5 @@
 #!/home/schoenstein/.conda/envs/graphe/bin/python
-#SBATCH --job-name=LP_M1
+#SBATCH --job-name=LP_M5
 #SBATCH --output=/home/schoenstein/these/slurm_out/slurm-%J.out --error=/home/schoenstein/these/slurm_out/slurm-%J.err
 
 
@@ -10,12 +10,13 @@ import torch
 from torch_geometric.utils import from_networkx
 import torch_geometric.transforms as T
 from torch_geometric.data import Data
-from torch_geometric.nn import SAGEConv
+from torch_geometric.nn import Node2Vec
 import torch.nn.functional as F
 from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
 from datetime import datetime
+import torch.nn as nn
 
 
 
@@ -23,7 +24,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
-with open("M1_settings.json", "r") as file:
+with open("M2_settings.json", "r") as file:
     settings = json.load(file)
 
 
@@ -118,23 +119,9 @@ elif settings["options"]["negative_sampling"] == "double split":
 
 
 
-if settings["options"]["attributes"] == "unique":
-    train_data.x = torch.ones((train_data.num_nodes, 1))
-    val_data.x = train_data.x.clone()
-    test_data.x = train_data.x.clone()
-elif settings["options"]["attributes"] == "statistics":
-    G_train = nx.Graph()
-    G_train.add_nodes_from(range(train_data.num_nodes))
-    G_train.add_edges_from(train_data.edge_index.t().tolist())
-    degree = dict(G_train.degree())
-    max_degree = max(degree.values())
-    degree_norm = {n: d/max_degree for n, d in degree.items()}
-    clustering = nx.clustering(G_train)
-    degree_tensor = torch.tensor(list(degree_norm.values()), dtype=torch.float32)
-    clustering_tensor = torch.tensor(list(clustering.values()), dtype=torch.float32)
-    train_data.x = torch.stack([degree_tensor, clustering_tensor], dim=-1)
-    val_data.x = train_data.x.clone()
-    test_data.x = train_data.x.clone()
+train_data.x = torch.ones((train_data.num_nodes, 1))
+val_data.x = train_data.x.clone()
+test_data.x = train_data.x.clone()
 
 
 
@@ -144,120 +131,92 @@ test_data = test_data.to(device)
 
 
 
+model_n2v = Node2Vec(
+    edge_index = train_data.edge_index,
+    embedding_dim = settings["options"]["embedding_dim"],
+    walk_length = settings["options"]["walk_length"],
+    context_size = settings["options"]["context_size"],
+    walks_per_node = settings["options"]["walks_per_node"],
+    p = settings["options"]["p"],
+    q = settings["options"]["q"],
+    num_negative_samples = settings["options"]["num_negative_samples"],
+    sparse=True
+)
+optimizer = torch.optim.SparseAdam(list(model_n2v.parameters()), lr=settings["options"]["lr"])
+n2v_loader = model_n2v.loader(batch_size = 128, shuffle =  True)
 
-class GNN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels):
+
+
+class Predictor(nn.Module):
+    def __init__(self, hidden_channels):
         super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels, aggr = settings["options"]["aggr"])
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels, aggr = settings["options"]["aggr"])
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = torch.relu(x)
-        x = self.conv2(x, edge_index)
-        return x
-class Predictor(torch.nn.Module):
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * hidden_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 1)
+        )
+
     def forward(self, x, edge_label_index):
         edge_emb_src = x[edge_label_index[0]]
         edge_emb_dst = x[edge_label_index[1]]
-        edge_emb_src = F.normalize(edge_emb_src, dim = -1)
-        edge_emb_dst = F.normalize(edge_emb_dst, dim = -1)
-        pred = (edge_emb_src * edge_emb_dst).sum(dim = -1)
-        return pred
-class Model(torch.nn.Module):
-    def __init__(self, in_channels, hiden_channels):
-        super().__init__()
-        self.gnn = GNN(in_channels, hiden_channels)
-        self.predictor = Predictor()
-    def forward(self, data):
-        x = self.gnn(data.x, data.edge_index)
-        pred = self.predictor(x, data.edge_label_index)
-        return pred
-model = Model(in_channels = train_data.x.shape[1], hiden_channels = settings["options"]["hidden_channels"]).to(device)
+        edge_emb = torch.cat([edge_emb_src, edge_emb_dst], dim=-1)
+        return self.mlp(edge_emb).view(-1)
+
+predictor = Predictor(hidden_channels=settings["options"]["hidden_channels"])
 
 
 
-train_loader = LinkNeighborLoader(
-    data = train_data,
-    num_neighbors = settings["options"]["num_neighbors"],
-    edge_label_index = train_data.edge_label_index,
-    edge_label = train_data.edge_label,
-    batch_size = settings["options"]["batch_size"],
-    shuffle = True
-)
-val_loader = LinkNeighborLoader(
-    data = val_data,
-    num_neighbors = settings["options"]["num_neighbors"], 
-    edge_label_index = val_data.edge_label_index,
-    edge_label = val_data.edge_label,
-    batch_size = settings["options"]["batch_size"],
-    shuffle = True
-)
-
-
-
-optimizer = torch.optim.Adam(model.parameters(), lr=settings["options"]["lr"])
+optimizer = torch.optim.Adam(list(model_n2v.parameters()) + list(predictor.parameters()), lr = settings["options"]["lr"])
 
 
 
 def train_epoch():
-    model.train()
-    total_loss = 0
+    model_n2v.train()
+    predictor.train()
+    optimizer.zero_grad()
+    loss_n2v = 0
     count = 0
-    for batch in train_loader:
-        batch = batch.to(device)
-        optimizer.zero_grad()
-        pred = model(batch)
-        loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
-        loss.backward()
-        optimizer.step()
-        total_loss = total_loss + loss.item()
+    for pos, neg in n2v_loader:
+        loss = model_n2v.loss(pos, neg)
+        loss_n2v = loss_n2v + loss.item()
         count = count + 1
-    return total_loss / count
+    loss_n2v = loss_n2v / count
+    z = model_n2v()   
+    pred = predictor(z, train_data.edge_label_index)
+    loss_lp = F.binary_cross_entropy_with_logits(pred, train_data.edge_label.float())
+    loss_total = loss_n2v + loss_lp
+    loss_total.backward()
+    optimizer.step()
+    return loss_n2v, loss_lp
 def evaluate():
-    model.eval()
-    y_truth = []
-    y_pred = []
-    total_loss = 0
-    count = 0
-    for batch in val_loader:
-        batch = batch.to(device)
-        pred = model(batch)
-        loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
-        y_truth.append(batch.edge_label)
-        y_pred.append(torch.sigmoid(pred))
-        total_loss = total_loss + loss.item()
-        count = count + 1
-    y_truth = torch.cat(y_truth).cpu().numpy()
-    y_pred = torch.cat(y_pred).detach().cpu().numpy()
-    auc = roc_auc_score(y_truth, y_pred)
-    ap = average_precision_score(y_truth, y_pred)
-    return total_loss / count, auc, ap
+    model_n2v.eval()
+    predictor.eval()
+    z = model_n2v()
+    y_pred = predictor(z, val_data.edge_label_index)
+    loss = F.binary_cross_entropy_with_logits(y_pred, val_data.edge_label.float()).item()
+    auc = roc_auc_score(val_data.edge_label.detach().numpy(),y_pred.detach().numpy())
+    ap = average_precision_score(val_data.edge_label.detach().numpy(),y_pred.detach().numpy())
+    return loss, auc, ap
 
 
 
 now = datetime.now()
-output_path = settings["output"] + "LP_M1_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
-with open(output_path, "w") as output:
+output_path = settings["output"] + "LP_M5_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
+with open(output_path, "a") as output:
     best_val_auc = 0
     limit = settings["options"]["early_stop"]
     count = 0
-    train_losses = []
-    val_aps = []
-    val_aucs = []
     for epoch in range(1, 50):
-        loss = train_epoch()
-        train_losses.append(loss)
+        loss_n2v, loss_lp = train_epoch()
         val_loss, val_auc, val_ap = evaluate()
-        val_aps.append(val_ap)
-        val_aucs.append(val_auc)
-        output.write(f"Epoch {epoch:03d}, Loss: {loss:.4f}, Val Loss : {val_loss:.4f}, Val AUC: {val_auc:.4f}, Val AP: {val_ap:.4f}\n")
+        print(f"Epoch {epoch:03d}, N2V Loss: {loss_n2v:.4f}, LP Loss : {loss_lp:.4f}, Val Loss : {val_loss:.4f}, Val AUC: {val_auc:.4f}, Val AP: {val_ap:.4f}")
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             count = 0
         else:
-            count =  count + 1
+            count += 1
             if count >= limit:
-                output.write("Early stop")
+                print("Early stop")
                 break
     output.write("\n")
     output.write("\n")

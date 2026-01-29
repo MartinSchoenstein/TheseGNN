@@ -1,5 +1,5 @@
 #!/home/schoenstein/.conda/envs/graphe/bin/python
-#SBATCH --job-name=LP_M1
+#SBATCH --job-name=LP_M9
 #SBATCH --output=/home/schoenstein/these/slurm_out/slurm-%J.out --error=/home/schoenstein/these/slurm_out/slurm-%J.err
 
 
@@ -10,12 +10,13 @@ import torch
 from torch_geometric.utils import from_networkx
 import torch_geometric.transforms as T
 from torch_geometric.data import Data
-from torch_geometric.nn import SAGEConv
+from torch_geometric.nn import GAE
 import torch.nn.functional as F
 from torch_geometric.loader import LinkNeighborLoader
 from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score
 from datetime import datetime
+from torch_geometric.nn import GCNConv
 
 
 
@@ -23,7 +24,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
-with open("M1_settings.json", "r") as file:
+with open("M2_settings.json", "r") as file:
     settings = json.load(file)
 
 
@@ -144,112 +145,51 @@ test_data = test_data.to(device)
 
 
 
-
-class GNN(torch.nn.Module):
+class Encoder(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels):
         super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels, aggr = settings["options"]["aggr"])
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels, aggr = settings["options"]["aggr"])
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index)
-        x = torch.relu(x)
-        x = self.conv2(x, edge_index)
-        return x
-class Predictor(torch.nn.Module):
-    def forward(self, x, edge_label_index):
-        edge_emb_src = x[edge_label_index[0]]
-        edge_emb_dst = x[edge_label_index[1]]
-        edge_emb_src = F.normalize(edge_emb_src, dim = -1)
-        edge_emb_dst = F.normalize(edge_emb_dst, dim = -1)
-        pred = (edge_emb_src * edge_emb_dst).sum(dim = -1)
-        return pred
-class Model(torch.nn.Module):
-    def __init__(self, in_channels, hiden_channels):
-        super().__init__()
-        self.gnn = GNN(in_channels, hiden_channels)
-        self.predictor = Predictor()
-    def forward(self, data):
-        x = self.gnn(data.x, data.edge_index)
-        pred = self.predictor(x, data.edge_label_index)
-        return pred
-model = Model(in_channels = train_data.x.shape[1], hiden_channels = settings["options"]["hidden_channels"]).to(device)
-
-
-
-train_loader = LinkNeighborLoader(
-    data = train_data,
-    num_neighbors = settings["options"]["num_neighbors"],
-    edge_label_index = train_data.edge_label_index,
-    edge_label = train_data.edge_label,
-    batch_size = settings["options"]["batch_size"],
-    shuffle = True
-)
-val_loader = LinkNeighborLoader(
-    data = val_data,
-    num_neighbors = settings["options"]["num_neighbors"], 
-    edge_label_index = val_data.edge_label_index,
-    edge_label = val_data.edge_label,
-    batch_size = settings["options"]["batch_size"],
-    shuffle = True
-)
-
-
-
+        x = F.relu(x)
+        return self.conv2(x, edge_index)
+model = GAE(encoder=Encoder(in_channels = train_data.x.shape[1], hidden_channels = settings["options"]["hidden_channels"]))
 optimizer = torch.optim.Adam(model.parameters(), lr=settings["options"]["lr"])
 
 
 
 def train_epoch():
     model.train()
-    total_loss = 0
-    count = 0
-    for batch in train_loader:
-        batch = batch.to(device)
-        optimizer.zero_grad()
-        pred = model(batch)
-        loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
-        loss.backward()
-        optimizer.step()
-        total_loss = total_loss + loss.item()
-        count = count + 1
-    return total_loss / count
+    optimizer.zero_grad()
+    pred = model.encode(train_data.x, train_data.edge_index)
+    pos_edge_index = val_data.edge_label_index[:, val_data.edge_label==1]
+    neg_edge_index = val_data.edge_label_index[:, val_data.edge_label==0]
+    loss = model.recon_loss(pred, pos_edge_index, neg_edge_index)
+    loss.backward()
+    optimizer.step()
+    return loss.item()
 def evaluate():
     model.eval()
-    y_truth = []
-    y_pred = []
-    total_loss = 0
-    count = 0
-    for batch in val_loader:
-        batch = batch.to(device)
-        pred = model(batch)
-        loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
-        y_truth.append(batch.edge_label)
-        y_pred.append(torch.sigmoid(pred))
-        total_loss = total_loss + loss.item()
-        count = count + 1
-    y_truth = torch.cat(y_truth).cpu().numpy()
-    y_pred = torch.cat(y_pred).detach().cpu().numpy()
-    auc = roc_auc_score(y_truth, y_pred)
-    ap = average_precision_score(y_truth, y_pred)
-    return total_loss / count, auc, ap
+    pred = model.encode(val_data.x, val_data.edge_index)
+    pos_edge_index = val_data.edge_label_index[:, val_data.edge_label==1]
+    neg_edge_index = val_data.edge_label_index[:, val_data.edge_label==0]
+    loss = model.recon_loss(pred, pos_edge_index, neg_edge_index)
+    auc, ap = model.test(pred, pos_edge_index, neg_edge_index)
+    return loss, auc, ap
 
 
 
 now = datetime.now()
-output_path = settings["output"] + "LP_M1_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
+output_path = settings["output"] + "LP_M9_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
 with open(output_path, "w") as output:
     best_val_auc = 0
     limit = settings["options"]["early_stop"]
     count = 0
-    train_losses = []
-    val_aps = []
-    val_aucs = []
     for epoch in range(1, 50):
         loss = train_epoch()
-        train_losses.append(loss)
         val_loss, val_auc, val_ap = evaluate()
-        val_aps.append(val_ap)
-        val_aucs.append(val_auc)
         output.write(f"Epoch {epoch:03d}, Loss: {loss:.4f}, Val Loss : {val_loss:.4f}, Val AUC: {val_auc:.4f}, Val AP: {val_ap:.4f}\n")
         if val_auc > best_val_auc:
             best_val_auc = val_auc

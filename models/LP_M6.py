@@ -1,5 +1,5 @@
 #!/home/schoenstein/.conda/envs/graphe/bin/python
-#SBATCH --job-name=LP_M1
+#SBATCH --job-name=LP_M6
 #SBATCH --output=/home/schoenstein/these/slurm_out/slurm-%J.out --error=/home/schoenstein/these/slurm_out/slurm-%J.err
 
 
@@ -23,7 +23,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
-with open("M1_settings.json", "r") as file:
+with open("M2_settings.json", "r") as file:
     settings = json.load(file)
 
 
@@ -144,35 +144,22 @@ test_data = test_data.to(device)
 
 
 
+model = GraphSAGE(
+    in_channels=1,
+    hidden_channels = 64,
+    num_layers = 2,
+    aggr = "lstm"
+)
 
-class GNN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels):
-        super().__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels, aggr = settings["options"]["aggr"])
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels, aggr = settings["options"]["aggr"])
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index)
-        x = torch.relu(x)
-        x = self.conv2(x, edge_index)
-        return x
-class Predictor(torch.nn.Module):
-    def forward(self, x, edge_label_index):
-        edge_emb_src = x[edge_label_index[0]]
-        edge_emb_dst = x[edge_label_index[1]]
-        edge_emb_src = F.normalize(edge_emb_src, dim = -1)
-        edge_emb_dst = F.normalize(edge_emb_dst, dim = -1)
-        pred = (edge_emb_src * edge_emb_dst).sum(dim = -1)
-        return pred
-class Model(torch.nn.Module):
-    def __init__(self, in_channels, hiden_channels):
-        super().__init__()
-        self.gnn = GNN(in_channels, hiden_channels)
-        self.predictor = Predictor()
-    def forward(self, data):
-        x = self.gnn(data.x, data.edge_index)
-        pred = self.predictor(x, data.edge_label_index)
-        return pred
-model = Model(in_channels = train_data.x.shape[1], hiden_channels = settings["options"]["hidden_channels"]).to(device)
+
+
+def predictor(z, edge_label_index):
+    edge_emb_src = z[edge_label_index[0]]
+    edge_emb_dst = z[edge_label_index[1]]
+    edge_emb_src = F.normalize(edge_emb_src, dim = -1)
+    edge_emb_dst = F.normalize(edge_emb_dst, dim = -1)
+    pred = (edge_emb_src * edge_emb_dst).sum(dim = -1)
+    return pred
 
 
 
@@ -204,9 +191,9 @@ def train_epoch():
     total_loss = 0
     count = 0
     for batch in train_loader:
-        batch = batch.to(device)
         optimizer.zero_grad()
-        pred = model(batch)
+        z = model(batch.x, batch.edge_index)
+        pred = predictor(z, batch.edge_label_index)
         loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
         loss.backward()
         optimizer.step()
@@ -220,15 +207,15 @@ def evaluate():
     total_loss = 0
     count = 0
     for batch in val_loader:
-        batch = batch.to(device)
-        pred = model(batch)
+        z = model(batch.x, batch.edge_index)
+        pred = predictor(z, batch.edge_label_index)
         loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
         y_truth.append(batch.edge_label)
         y_pred.append(torch.sigmoid(pred))
         total_loss = total_loss + loss.item()
         count = count + 1
-    y_truth = torch.cat(y_truth).cpu().numpy()
-    y_pred = torch.cat(y_pred).detach().cpu().numpy()
+    y_truth = torch.cat(y_truth).numpy()
+    y_pred = torch.cat(y_pred).detach().numpy()
     auc = roc_auc_score(y_truth, y_pred)
     ap = average_precision_score(y_truth, y_pred)
     return total_loss / count, auc, ap
@@ -236,7 +223,7 @@ def evaluate():
 
 
 now = datetime.now()
-output_path = settings["output"] + "LP_M1_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
+output_path = settings["output"] + "LP_M6_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ".txt"
 with open(output_path, "w") as output:
     best_val_auc = 0
     limit = settings["options"]["early_stop"]
