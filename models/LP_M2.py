@@ -23,13 +23,17 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 
-with open("M2_settings.json", "r") as file:
+with open("/home/schoenstein/these/models/M2_settings.json", "r") as file:
     settings = json.load(file)
 
 
 
 G = nx.read_gml(settings["graph"])
 data = from_networkx(G)
+
+
+
+torch.manual_seed(42)
 
 
 
@@ -65,6 +69,7 @@ elif settings["options"]["negative_sampling"] == "double split":
         val_list.append(val_data2)
         test_list.append(test_data2)
     ratio_neg_inside = neg_inside/(len(list(G.edges()))*2)
+    print("Ratio neg intra cc : ", ratio_neg_inside)
     transform = T.RandomLinkSplit(
             num_val = 0.1,  
             num_test = 0.1,  
@@ -138,9 +143,9 @@ elif settings["options"]["attributes"] == "statistics":
 
 
 
-train_data = train_data.to(device)
-val_data = val_data.to(device)
-test_data = test_data.to(device)
+#train_data = train_data.to(device)
+#val_data = val_data.to(device)
+#test_data = test_data.to(device)
 
 
 
@@ -219,24 +224,25 @@ def train_epoch():
         count = count + 1
     return total_loss / count
 def evaluate():
-    model.eval()
-    y_truth = []
-    y_pred = []
-    total_loss = 0
-    count = 0
-    for batch in val_loader:
-        batch = batch.to(device)
-        pred = model(batch)
-        loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
-        y_truth.append(batch.edge_label)
-        y_pred.append(torch.sigmoid(pred))
-        total_loss = total_loss + loss.item()
-        count = count + 1
-    y_truth = torch.cat(y_truth).cpu().numpy()
-    y_pred = torch.cat(y_pred).detach().cpu().numpy()
-    auc = roc_auc_score(y_truth, y_pred)
-    ap = average_precision_score(y_truth, y_pred)
-    return total_loss / count, auc, ap
+    with torch.no_grad() :
+        model.eval()
+        y_truth = []
+        y_pred = []
+        total_loss = 0
+        count = 0
+        for batch in val_loader:
+            batch = batch.to(device)
+            pred = model(batch)
+            loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label.float())
+            y_truth.append(batch.edge_label.cpu())
+            y_pred.append(torch.sigmoid(pred).cpu())
+            total_loss = total_loss + loss.item()
+            count = count + 1
+        y_truth = torch.cat(y_truth).cpu().numpy()
+        y_pred = torch.cat(y_pred).detach().cpu().numpy()
+        auc = roc_auc_score(y_truth, y_pred)
+        ap = average_precision_score(y_truth, y_pred)
+        return total_loss / count, auc, ap
 
 
 
@@ -259,6 +265,8 @@ with open(output_path, "w") as output:
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             count = 0
+            output_model = settings["output"] + "model_LP_M2_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + "_E" + str(epoch) + ".pth"
+            torch.save(model.state_dict(), output_model)
         else:
             count =  count + 1
             if count >= limit:
