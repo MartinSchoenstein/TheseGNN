@@ -490,7 +490,7 @@ with open(output_path, "w") as output:
         val_aps.append(val_ap)
         val_aucs.append(val_auc)
         if val_auc > best_val_auc:
-            output_model = settings["output"] + "model_LP_M2_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ":" + str(now.second) + "_E" + str(epoch) + ".pth"
+            output_model = settings["output"] + "model_LP_M3_" + str(now.day) + "-" + str(now.month) + "-" + str(now.year) + "_" + str(now.hour) + ":" + str(now.minute) + ":" + str(now.second) + "_E" + str(epoch) + ".pth"
             torch.save(model.state_dict(), output_model)
             best_val_auc = val_auc
             count = 0
